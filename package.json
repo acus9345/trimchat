@@ -1,5 +1,5 @@
 {
-  "name": "fitchat",
+  "name": "trimchat",
   "version": "0.1.0",
   "description": "Trim chat history to fit a token budget without breaking it. Drops the oldest turns first, keeps system prompts and tool call/result pairs together, and works with OpenAI, Anthropic and Vercel AI SDK messages. Zero dependencies.",
   "keywords": [
@@ -20,13 +20,13 @@
     "ai-sdk",
     "prompt"
   ],
-  "homepage": "https://github.com/acus9345/fitchat#readme",
+  "homepage": "https://github.com/acus9345/trimchat#readme",
   "bugs": {
-    "url": "https://github.com/acus9345/fitchat/issues"
+    "url": "https://github.com/acus9345/trimchat/issues"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/acus9345/fitchat.git"
+    "url": "git+https://github.com/acus9345/trimchat.git"
   },
   "license": "MIT",
   "author": "acus9345 <acus9345@gmail.com>",

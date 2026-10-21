@@ -1,14 +1,14 @@
-# fitchat
+# trimchat
 
 Trim a chat history to fit a token budget **without breaking the conversation**. Drops the oldest turns first, keeps the system prompt, keeps tool calls with their results, makes sure the first message is from the user, and only cuts text when it has to. Works with OpenAI, Anthropic and Vercel AI SDK messages. Zero dependencies.
 
-[![npm](https://img.shields.io/npm/v/fitchat)](https://www.npmjs.com/package/fitchat)
-[![CI](https://github.com/acus9345/fitchat/actions/workflows/ci.yml/badge.svg)](https://github.com/acus9345/fitchat/actions/workflows/ci.yml)
-[![bundle size](https://img.shields.io/bundlejs/size/fitchat)](https://bundlejs.com/?q=fitchat)
-[![license](https://img.shields.io/npm/l/fitchat)](LICENSE)
+[![npm](https://img.shields.io/npm/v/trimchat)](https://www.npmjs.com/package/trimchat)
+[![CI](https://github.com/acus9345/trimchat/actions/workflows/ci.yml/badge.svg)](https://github.com/acus9345/trimchat/actions/workflows/ci.yml)
+[![bundle size](https://img.shields.io/bundlejs/size/trimchat)](https://bundlejs.com/?q=trimchat)
+[![license](https://img.shields.io/npm/l/trimchat)](LICENSE)
 
 ```ts
-import { fitChat } from "fitchat";
+import { fitChat } from "trimchat";
 
 const { messages } = fitChat(history, { maxTokens: 128_000, reserve: 8_000 });
 await openai.chat.completions.create({ model: "gpt-5", messages });
@@ -18,7 +18,7 @@ await openai.chat.completions.create({ model: "gpt-5", messages });
 
 `history.slice(-20)` is how most apps do it, and it breaks in ways that only show up in production:
 
-| Problem | `slice(-N)` | fitchat |
+| Problem | `slice(-N)` | trimchat |
 | --- | --- | --- |
 | Long messages still overflow the context | ❌ | budget in tokens, not messages |
 | System prompt gets cut off | ❌ | always kept |
@@ -31,7 +31,7 @@ await openai.chat.completions.create({ model: "gpt-5", messages });
 ## Install
 
 ```sh
-npm install fitchat
+npm install trimchat
 ```
 
 ## Usage
@@ -39,7 +39,7 @@ npm install fitchat
 ### OpenAI
 
 ```ts
-import { fitChat } from "fitchat";
+import { fitChat } from "trimchat";
 
 const { messages, dropped } = fitChat(history, {
   maxTokens: 400_000, // the model's context window
@@ -62,7 +62,7 @@ await anthropic.messages.create({ model: "claude-sonnet-5-5", max_tokens: 8_000,
 
 ```ts
 import { streamText } from "ai";
-import { fitChat } from "fitchat";
+import { fitChat } from "trimchat";
 
 const { messages } = fitChat(modelMessages, { maxTokens: 128_000, reserve: 4_000 });
 streamText({ model, messages });
@@ -70,7 +70,7 @@ streamText({ model, messages });
 
 ### Exact token counts
 
-By default fitchat estimates tokens (about 4 characters per token, 1 per CJK character), which is fast and usually within 10-15%. For exact counts, plug in a tokenizer:
+By default trimchat estimates tokens (about 4 characters per token, 1 per CJK character), which is fast and usually within 10-15%. For exact counts, plug in a tokenizer:
 
 ```ts
 import { encode } from "gpt-tokenizer";
@@ -92,7 +92,7 @@ fitChat(history, {
 });
 ```
 
-The placeholder goes where the dropped messages were, and fitchat makes room for it in the budget. You can also return a real summary (computed earlier) from it.
+The placeholder goes where the dropped messages were, and trimchat makes room for it in the budget. You can also return a real summary (computed earlier) from it.
 
 ## Options
 
