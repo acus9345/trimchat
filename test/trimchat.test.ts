@@ -36,11 +36,22 @@ describe("countMessageTokens()", () => {
       tool_calls: [{ id: "1", type: "function", function: { name: "get_weather", arguments: '{"city": "Paris"}' } }],
     };
     assert.equal(countMessageTokens(call, words), 1 + 2 + 3);
+    const objectArgsCall = {
+      role: "assistant",
+      content: null,
+      tool_calls: [{ id: "2", type: "function", function: { name: "get_weather", arguments: { city: "Paris" } } }],
+    };
+    assert.equal(countMessageTokens(objectArgsCall, words), 1 + 1 + 3);
     const anthropic = {
       role: "user",
       content: [{ type: "tool_result", tool_use_id: "x", content: [{ type: "text", text: "sunny and warm" }] }],
     };
     assert.equal(countMessageTokens(anthropic, words), 3);
+    const fnOutput = {
+      role: "user",
+      content: [{ type: "function_call_output", call_id: "fc_1", output: "sunny and warm" }],
+    };
+    assert.equal(countMessageTokens(fnOutput, words), 3);
     assert.equal(countTokens([msg("user", 2), msg("assistant", 3)], words), 5);
   });
 });
@@ -86,6 +97,13 @@ describe("fitChat()", () => {
     const r2 = fitChat(history, { ...words, maxTokens: 25, keepLast: 3, truncate: false });
     assert.deepEqual(r2.messages, history.slice(2));
     assert.equal(r2.fits, false);
+  });
+
+  it("clamps negative keepFirst and keepLast to zero", () => {
+    const history = [msg("user", 10, "u1"), msg("assistant", 10, "a1"), msg("user", 10, "u2")];
+    const r = fitChat(history, { ...words, maxTokens: 15, keepFirst: -2, keepLast: -1 });
+    assert.deepEqual(r.messages, [history[2]]);
+    assert.equal(r.fits, true);
   });
 
   it("keeps OpenAI tool calls and their results together", () => {
@@ -163,6 +181,53 @@ describe("fitChat()", () => {
     const parts = r.messages[0]!.content as Array<{ type: string; text?: string }>;
     assert.equal(parts[0]!.type, "image");
     assert.ok(parts[1]!.text!.length < long.length);
+  });
+
+  it("truncates multiple text parts in the same message when one part isn't enough", () => {
+    const long1 = Array.from({ length: 100 }, (_, i) => `a${i}`).join(" ");
+    const long2 = Array.from({ length: 100 }, (_, i) => `b${i}`).join(" ");
+    const history = [{ role: "user", content: [{ type: "text", text: long1 }, { type: "text", text: long2 }] }];
+    const r = fitChat(history, { ...words, maxTokens: 40 });
+    assert.equal(r.truncated, true);
+    assert.equal(r.fits, true);
+    assert.ok(r.tokens <= 40);
+    const parts = r.messages[0]!.content as Array<{ type: string; text: string }>;
+    assert.ok(parts[0]!.text.length < long1.length);
+    assert.ok(parts[1]!.text.length < long2.length);
+  });
+
+  it("truncates string tool_result and function_call_output parts when a kept tool turn overflows", () => {
+    const long = Array.from({ length: 100 }, (_, i) => `r${i}`).join(" ");
+    const history: ChatMessage[] = [
+      { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "fetch", input: {} }] },
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: long }] },
+    ];
+    const r = fitChat(history, { ...words, maxTokens: 30 });
+    assert.equal(r.truncated, true);
+    assert.equal(r.fits, true);
+    assert.ok(r.tokens <= 30);
+    const parts = r.messages[1]!.content as Array<{ type: string; content: string }>;
+    assert.ok(parts[0]!.content.includes("[…]"));
+    assert.equal((history[1]!.content as Array<{ content: string }>)[0]!.content, long);
+  });
+
+  it("does not split UTF-16 surrogate pairs when truncating", () => {
+    const emojis = "😀".repeat(60);
+    const history = [{ role: "user", content: emojis }];
+    const r = fitChat(history, { countTokens: (t) => t.length, messageOverhead: 0, maxTokens: 25 });
+    assert.equal(r.truncated, true);
+    assert.equal(r.fits, true);
+    const text = r.messages[0]!.content as string;
+    for (let i = 0; i < text.length; i++) {
+      const code = text.charCodeAt(i);
+      if (code >= 0xd800 && code <= 0xdbff) {
+        const next = text.charCodeAt(i + 1);
+        assert.ok(next >= 0xdc00 && next <= 0xdfff, "unpaired high surrogate");
+        i++;
+      } else {
+        assert.ok(code < 0xdc00 || code > 0xdfff, "unpaired low surrogate");
+      }
+    }
   });
 
   it("reports fits: false when protected content can't shrink", () => {

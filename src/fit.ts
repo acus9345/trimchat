@@ -1,4 +1,4 @@
-import { countMessageTokens, type ChatMessage, type CountOptions } from "./tokens.js";
+import { countMessageTokens, estimateTokens, type ChatMessage, type CountOptions } from "./tokens.js";
 
 export interface FitOptions<M extends ChatMessage = ChatMessage> extends CountOptions {
   /** The model's context window (or any budget) in tokens. */
@@ -48,6 +48,12 @@ interface Group {
   end: number;
   tokens: number;
   system: boolean;
+}
+
+interface TextTarget {
+  key: string;
+  text: string;
+  set: (text: string) => ChatMessage;
 }
 
 const TRUNCATION_MARKER = "\n\n[…]\n\n";
@@ -105,8 +111,8 @@ export function fitChat<M extends ChatMessage>(messages: readonly M[], options: 
   });
 
   const conversation = groups.filter((g) => !g.system);
-  const head = Math.min(keepFirst, conversation.length);
-  const tail = Math.max(head, conversation.length - keepLast);
+  const head = Math.min(Math.max(0, keepFirst), conversation.length);
+  const tail = Math.max(head, conversation.length - Math.max(0, keepLast));
   const droppable = conversation.slice(head, tail);
   const total = systemTokens + groups.reduce((n, g) => n + g.tokens, 0);
 
@@ -167,55 +173,116 @@ export function fitChat<M extends ChatMessage>(messages: readonly M[], options: 
   return { messages: out, tokens, budget, dropped: collect(dropped), truncated, fits: tokens <= budget };
 }
 
-/** Finds the longest piece of text in a message: its string content or its longest text part. */
-function longestText(m: ChatMessage): { text: string; set: (text: string) => ChatMessage } | undefined {
-  if (typeof m.content === "string") return { text: m.content, set: (text) => ({ ...m, content: text }) };
-  if (!Array.isArray(m.content)) return undefined;
-  let best = -1;
-  m.content.forEach((p: { text?: unknown } | null, i: number) => {
-    if (typeof p?.text === "string" && (best === -1 || p.text.length > (m.content as Array<{ text: string }>)[best]!.text.length)) best = i;
-  });
-  if (best === -1) return undefined;
-  const parts = m.content as Array<{ text: string }>;
-  return {
-    text: parts[best]!.text,
-    set: (text) => ({ ...m, content: parts.map((p, i) => (i === best ? { ...p, text } : p)) }),
-  };
+function isHighSurrogate(code: number): boolean {
+  return code >= 0xd800 && code <= 0xdbff;
 }
 
-/** Cuts the middle out of the longest non-system messages until `over` tokens are saved. */
+function isLowSurrogate(code: number): boolean {
+  return code >= 0xdc00 && code <= 0xdfff;
+}
+
+/** Cuts the middle out of `text` to keep at most `keep` UTF-16 code units without splitting surrogate pairs. */
+function cutMiddle(text: string, keep: number): string {
+  if (keep >= text.length) return text;
+  let headEnd = Math.ceil(keep / 2);
+  let tailStart = text.length - Math.floor(keep / 2);
+  if (headEnd > 0 && isHighSurrogate(text.charCodeAt(headEnd - 1)) && isLowSurrogate(text.charCodeAt(headEnd))) {
+    headEnd -= 1;
+  }
+  if (
+    tailStart > 0 &&
+    tailStart < text.length &&
+    isLowSurrogate(text.charCodeAt(tailStart)) &&
+    isHighSurrogate(text.charCodeAt(tailStart - 1))
+  ) {
+    tailStart += 1;
+  }
+  if (headEnd === 0 && tailStart === text.length) return TRUNCATION_MARKER.trim();
+  return text.slice(0, headEnd) + TRUNCATION_MARKER + text.slice(tailStart);
+}
+
+/** Finds all truncatable text fields in a message: string content, text parts, or string tool-result parts. */
+function textTargets(m: ChatMessage): TextTarget[] {
+  if (typeof m.content === "string") {
+    return [{ key: "content", text: m.content, set: (text) => ({ ...m, content: text }) }];
+  }
+  if (!Array.isArray(m.content)) return [];
+  const parts = m.content as unknown[];
+  const targets: TextTarget[] = [];
+  for (let i = 0; i < parts.length; i++) {
+    const raw = parts[i];
+    if (!raw || typeof raw !== "object") continue;
+    const p = raw as Record<string, unknown>;
+    if (typeof p.text === "string") {
+      targets.push({
+        key: `${i}:text`,
+        text: p.text,
+        set: (text) => ({ ...m, content: parts.map((item, j) => (j === i ? { ...p, text } : item)) }),
+      });
+      continue;
+    }
+    const type = typeof p.type === "string" ? p.type : "";
+    if (type === "tool_result" || type === "tool-result" || type === "function_call_output") {
+      const field =
+        typeof p.content === "string"
+          ? "content"
+          : typeof p.output === "string"
+            ? "output"
+            : typeof p.result === "string"
+              ? "result"
+              : undefined;
+      if (field) {
+        targets.push({
+          key: `${i}:${field}`,
+          text: p[field] as string,
+          set: (text) => ({ ...m, content: parts.map((item, j) => (j === i ? { ...p, [field]: text } : item)) }),
+        });
+      }
+    }
+  }
+  return targets;
+}
+
+/** Cuts the middle out of the longest non-system text fields until `over` tokens are saved. */
 function shorten(out: ChatMessage[], over: number, options: CountOptions): { changed: boolean; saved: number } {
   const count = (m: ChatMessage) => countMessageTokens(m, options);
+  const countText = options.countTokens ?? estimateTokens;
   let saved = 0;
   let changed = false;
-  const tried = new Set<number>();
+  const tried = new Set<string>();
   while (saved < over) {
     let pick = -1;
-    let pickTokens = 0;
-    out.forEach((m, i) => {
-      if (tried.has(i) || isSystem(m) || !longestText(m)) return;
-      const t = count(m);
-      if (t > pickTokens) {
-        pick = i;
-        pickTokens = t;
+    let pickTarget: TextTarget | undefined;
+    let pickScore = 0;
+    for (let i = 0; i < out.length; i++) {
+      const m = out[i]!;
+      if (isSystem(m)) continue;
+      for (const target of textTargets(m)) {
+        const id = `${i}:${target.key}`;
+        if (tried.has(id)) continue;
+        const score = countText(target.text);
+        if (score > pickScore) {
+          pick = i;
+          pickTarget = target;
+          pickScore = score;
+        }
       }
-    });
-    if (pick === -1) break;
-    tried.add(pick);
+    }
+    if (pick === -1 || !pickTarget) break;
+    tried.add(`${pick}:${pickTarget.key}`);
     const m = out[pick]!;
-    const { text, set } = longestText(m)!;
-    const target = pickTokens - (over - saved);
-    // Binary search the most text (head + tail) that keeps the message within target.
+    const pickTokens = count(m);
+    const { text, set } = pickTarget;
+    const targetTokens = pickTokens - (over - saved);
+    // Binary search the most text (head + tail) that keeps the message within targetTokens.
     let lo = 0;
     let hi = text.length;
-    const cut = (keep: number) =>
-      keep >= text.length ? text : text.slice(0, Math.ceil(keep / 2)) + TRUNCATION_MARKER + text.slice(text.length - Math.floor(keep / 2));
     while (lo < hi) {
       const mid = Math.ceil((lo + hi) / 2);
-      if (count(set(cut(mid))) <= target) lo = mid;
+      if (count(set(cutMiddle(text, mid))) <= targetTokens) lo = mid;
       else hi = mid - 1;
     }
-    const next = set(lo === 0 ? TRUNCATION_MARKER.trim() : cut(lo));
+    const next = set(cutMiddle(text, lo));
     const nextTokens = count(next);
     if (nextTokens >= pickTokens) continue;
     out[pick] = next;

@@ -36,8 +36,8 @@ function partTokens(part: unknown, count: (t: string) => number, imageTokens: nu
   const type = typeof p.type === "string" ? p.type : "";
   if (MEDIA.has(type)) return imageTokens;
   if (typeof p.text === "string") return count(p.text);
-  // Anthropic tool_result, AI SDK tool-result: content or output can be nested parts.
-  if (type === "tool_result" || type === "tool-result") {
+  // Anthropic tool_result, AI SDK tool-result, OpenAI Responses function_call_output.
+  if (type === "tool_result" || type === "tool-result" || type === "function_call_output") {
     const body = p.content ?? p.output ?? p.result;
     if (typeof body === "string") return count(body);
     if (Array.isArray(body)) return sumParts(body, count, imageTokens);
@@ -67,8 +67,12 @@ export function countMessageTokens(message: ChatMessage, options: CountOptions =
   else if (content != null) n += partTokens(content, count, imageTokens);
   // OpenAI tool calls on assistant messages.
   if (Array.isArray(message.tool_calls)) {
-    for (const call of message.tool_calls as Array<{ function?: { name?: string; arguments?: string } }>) {
-      n += count(call.function?.name ?? "") + count(call.function?.arguments ?? "") + 3;
+    for (const call of message.tool_calls as Array<{ function?: { name?: unknown; arguments?: unknown } } | null>) {
+      const fn = call?.function;
+      const name = typeof fn?.name === "string" ? fn.name : "";
+      const args = fn?.arguments;
+      const argsText = typeof args === "string" ? args : args == null ? "" : JSON.stringify(args);
+      n += count(name) + count(argsText) + 3;
     }
   }
   if (typeof message.name === "string") n += count(message.name);
